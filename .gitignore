@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+venv/
+env/
+.venv/
+
+# Database
+*.db
+*.sqlite
+backend/product_siksha.db
+backend/questions.db
+
+# Build
+dist/
+build/
+*.pyc
+__pycache__/
+
+# Environment
+.env
+
+# OS
+.DS_Store
+
+# Misc
+backend_local_v1/
