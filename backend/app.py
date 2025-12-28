@@ -22,7 +22,12 @@ from dotenv import load_dotenv
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app, origins=['http://localhost:5173', 'http://127.0.0.1:5173'])
+CORS(app, origins=[
+    'http://localhost:5173', 
+    'http://127.0.0.1:5173',
+    'https://productsiksha.vercel.app',
+    'https://www.productsiksha.vercel.app'
+])
 
 # Configuration
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-secret-key-change-in-production')
@@ -117,6 +122,15 @@ def parse_timestamp(ts_string):
 # ============================================================================
 # Routes
 # ============================================================================
+
+# Initialize tables (Running this at module level ensures tables exist when running via Gunicorn)
+# This is crucial for Cloud Run with SQLite to ensure tables exist after a cold start
+with app.app_context():
+    try:
+        db.create_all()
+        print("✅ Database tables created successfully")
+    except Exception as e:
+        print(f"⚠️ Error creating database tables: {e}")
 
 @app.route('/api/auth/init', methods=['GET'])
 def init_tables():
@@ -433,37 +447,45 @@ def toggle_question_completion(question_id):
 
 @app.route('/api/feedback', methods=['POST'])
 def get_ai_feedback():
-    """Get AI feedback on candidate's answer using Anthropic Claude."""
+    """Get AI feedback on candidate's answer using Google Gemini."""
     data = request.get_json()
     question = data.get('question', '')
     answer = data.get('answer', '')
     prompt = data.get('prompt', 'Please analyze my answer and provide feedback.')
+    files = data.get('files', [])  # List of {name, type, base64} objects
     
     if not question:
         return jsonify({'error': 'Question is required'}), 400
     
+    # Build context message based on whether there's an answer
     if not answer.strip():
-        prompt = f"I haven't written an answer yet. {prompt} Please provide guidance on how to approach this question."
+        user_request = f"I haven't written an answer yet. {prompt} Please provide guidance on how to approach this question."
+    else:
+        user_request = prompt if prompt else 'Please analyze my answer and provide feedback.'
     
     if not GEMINI_API_KEY:
-        # Mock feedback
+        # Mock feedback for demo mode
+        file_mention = f"\n\n*Note: You attached {len(files)} file(s). In demo mode, file analysis is not available.*" if files else ""
         return jsonify({
             'feedback': f'''**AI Feedback** (Demo Mode - No API Key)
 
-Thank you for your answer! Here's some structured feedback:
+Thank you for your message! Here's some structured feedback:
+
+**Your Question Context:**
+This is about: {question[:100]}...
 
 **Strengths:**
-- You've addressed the core question
-- Your approach shows product thinking
+- You're actively practicing PM interview questions
+- Seeking feedback shows growth mindset
 
-**Areas for Improvement:**
-- Consider adding specific metrics
-- Include more stakeholder perspectives
-- Structure your answer using frameworks like CIRCLES
+**Guidance:**
+- Structure your answer using frameworks like CIRCLES, STAR, or RICE
+- Include specific metrics and success measures
+- Consider multiple stakeholder perspectives
 
 **Next Steps:**
-- Practice with more questions in this category
-- Focus on quantifiable outcomes
+- Try answering the question before asking for feedback
+- Focus on quantifiable outcomes{file_mention}
 
 *Note: Connect your Google Gemini API key for personalized AI feedback.*''',
             'model': 'demo'
@@ -471,38 +493,70 @@ Thank you for your answer! Here's some structured feedback:
     
     try:
         import google.generativeai as genai
-        genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel('gemini-flash-latest')
+        import base64
         
-        system_prompt = """You are an expert PM interview coach. Your role is to analyze 
-candidate answers to PM interview questions and provide constructive, actionable feedback.
+        genai.configure(api_key=GEMINI_API_KEY)
+        
+        # Use vision model if files are attached
+        if files:
+            model = genai.GenerativeModel('gemini-2.0-flash-exp')
+        else:
+            model = genai.GenerativeModel('gemini-2.0-flash-exp')
+        
+        system_prompt = """You are an expert PM interview coach having a conversation with a candidate. 
+Your role is to help them prepare for product management interviews through constructive, actionable feedback.
 
-Structure your feedback as:
-1. **Strengths** - What the candidate did well
-2. **Areas for Improvement** - Specific things to improve
-3. **Suggested Framework** - A framework they could use (CIRCLES, STAR, etc.)
-4. **Sample Enhancement** - A brief example of how to strengthen one point
+Be conversational and encouraging but honest. Adapt your response to what the candidate asks:
+- If they share an answer, provide structured feedback (Strengths, Areas for Improvement, Suggested Framework)
+- If they ask a clarifying question, answer it directly
+- If they share a diagram or image, analyze it and provide feedback on their visual communication
+- Keep responses focused and not too long
 
-Be encouraging but honest. Focus on practical improvements."""
+Remember the context: This is about the PM interview question provided."""
 
-        user_message = f"""{system_prompt}
+        # Build the content for Gemini
+        content_parts = []
+        
+        # Add system context and question
+        context = f"""{system_prompt}
 
-Question: {question}
+**Interview Question:** {question}
 
-Candidate's Answer: {answer if answer else '(No answer provided yet)'}
+**Candidate's Answer/Message:** {answer if answer else '(No answer provided yet)'}
 
-Candidate's Request: {prompt}
-
-Please provide detailed feedback."""
-
-        response = model.generate_content(user_message)
+**Candidate's Request:** {user_request}
+"""
+        content_parts.append(context)
+        
+        # Add any attached images for multimodal analysis
+        for file_data in files:
+            if file_data.get('type', '').startswith('image/') and file_data.get('base64'):
+                try:
+                    # Extract base64 data (remove data URL prefix if present)
+                    base64_str = file_data['base64']
+                    if ',' in base64_str:
+                        base64_str = base64_str.split(',')[1]
+                    
+                    image_bytes = base64.b64decode(base64_str)
+                    content_parts.append({
+                        'mime_type': file_data['type'],
+                        'data': image_bytes
+                    })
+                except Exception as img_error:
+                    print(f"Error processing image: {img_error}")
+        
+        content_parts.append("\nPlease provide your response:")
+        
+        response = model.generate_content(content_parts)
         
         return jsonify({
             'feedback': response.text,
-            'model': 'gemini-flash-latest'
+            'model': 'gemini-2.0-flash-exp',
+            'files_processed': len([f for f in files if f.get('type', '').startswith('image/')])
         })
         
     except Exception as e:
+        print(f"Gemini API error: {str(e)}")
         return jsonify({
             'error': f'AI service error: {str(e)}',
             'feedback': 'Unable to get AI feedback at this time. Please try again.'

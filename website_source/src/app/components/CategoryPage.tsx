@@ -1,9 +1,16 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
-import { ChevronLeft, ChevronRight, Send, Loader2, CheckCircle2 } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Loader2, CheckCircle2 } from 'lucide-react';
 import Navigation from './Navigation';
+import ChatInterface from './ChatInterface';
 
 import { API_BASE } from '../config';
+
+interface FileAttachment {
+  file: File;
+  preview?: string;
+  base64?: string;
+}
 
 
 interface Question {
@@ -56,10 +63,7 @@ export default function CategoryPage({ onLogout }: CategoryPageProps) {
   const [companies, setCompanies] = useState<Company[]>([]);
   const [loading, setLoading] = useState(true);
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
-  const [answer, setAnswer] = useState('');
-  const [prompt, setPrompt] = useState('');
-  const [feedback, setFeedback] = useState('');
-  const [feedbackLoading, setFeedbackLoading] = useState(false);
+  const [chatLoading, setChatLoading] = useState(false);
 
   // Filters
   const [selectedCompany, setSelectedCompany] = useState('');
@@ -114,9 +118,6 @@ export default function CategoryPage({ onLogout }: CategoryPageProps) {
 
         // If all are completed, start at 0 (or last). If mix, start at first uncompleted.
         setCurrentQuestionIndex(firstUncompletedIndex >= 0 ? firstUncompletedIndex : 0);
-
-        setAnswer('');
-        setFeedback('');
         setLoading(false);
       })
       .catch(err => {
@@ -127,30 +128,39 @@ export default function CategoryPage({ onLogout }: CategoryPageProps) {
 
   const currentQuestion = questions[currentQuestionIndex];
 
-  const handleGetFeedback = async () => {
-    if (!currentQuestion) return;
+  // Handle sending messages to AI chat
+  const handleSendMessage = useCallback(async (message: string, files: FileAttachment[]): Promise<string> => {
+    if (!currentQuestion) return 'No question selected.';
 
-    setFeedbackLoading(true);
+    setChatLoading(true);
     try {
+      // Prepare file data for API
+      const fileData = files.map(f => ({
+        name: f.file.name,
+        type: f.file.type,
+        base64: f.base64
+      }));
+
       const response = await fetch(`${API_BASE}/feedback`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           question: currentQuestion.question,
-          answer: answer,
-          prompt: prompt || 'Please analyze my answer and provide feedback.'
+          answer: message,
+          prompt: message || 'Please analyze my answer and provide feedback.',
+          files: fileData
         })
       });
 
       const data = await response.json();
-      setFeedback(data.feedback || 'Unable to get feedback.');
+      return data.feedback || 'Unable to get feedback.';
     } catch (error) {
       console.error('Error getting feedback:', error);
-      setFeedback('Error getting AI feedback. Please try again.');
+      throw new Error('Error getting AI feedback. Please try again.');
     } finally {
-      setFeedbackLoading(false);
+      setChatLoading(false);
     }
-  };
+  }, [currentQuestion]);
 
   const handleToggleCompletion = async () => {
     if (!currentQuestion) return;
@@ -182,18 +192,12 @@ export default function CategoryPage({ onLogout }: CategoryPageProps) {
   const goToPrevious = () => {
     if (currentQuestionIndex > 0) {
       setCurrentQuestionIndex(currentQuestionIndex - 1);
-      setAnswer('');
-      setFeedback('');
-      setPrompt('');
     }
   };
 
   const goToNext = () => {
     if (currentQuestionIndex < questions.length - 1) {
       setCurrentQuestionIndex(currentQuestionIndex + 1);
-      setAnswer('');
-      setFeedback('');
-      setPrompt('');
     }
   };
 
@@ -281,58 +285,16 @@ export default function CategoryPage({ onLogout }: CategoryPageProps) {
             </div>
           </div>
 
-          {/* Middle Pane - Canvas */}
+          {/* Middle Pane - Chat Interface */}
           <div className="flex-1">
-            <div className="bg-white rounded-lg shadow-sm">
-              {/* Answer Area */}
-              <div className="p-6 border-b border-gray-200">
-                <h3 className="font-semibold mb-4">Your Answer</h3>
-                <textarea
-                  value={answer}
-                  onChange={(e) => setAnswer(e.target.value)}
-                  placeholder=""
-                  className="w-full h-80 px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
-                />
-              </div>
-
-              {/* Prompt Input */}
-              <div className="p-6">
-                <div className="flex gap-3">
-                  <input
-                    type="text"
-                    value={prompt}
-                    onChange={(e) => setPrompt(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && !feedbackLoading && handleGetFeedback()}
-                    placeholder="Ask AI for specific feedback or guidance..."
-                    className="flex-1 px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  />
-                  <button
-                    onClick={handleGetFeedback}
-                    disabled={feedbackLoading}
-                    className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {feedbackLoading ? (
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                    ) : (
-                      <Send className="w-4 h-4" />
-                    )}
-                    Get Feedback
-                  </button>
-                </div>
-              </div>
-
-              {/* AI Feedback */}
-              {feedback && (
-                <div className="p-6 bg-gray-50 border-t border-gray-200">
-                  <h3 className="font-semibold mb-4">AI Feedback</h3>
-                  <div className="prose max-w-none">
-                    <pre className="whitespace-pre-wrap text-sm text-gray-700 bg-white p-4 rounded-lg border border-gray-200">
-                      {feedback}
-                    </pre>
-                  </div>
-                </div>
-              )}
-            </div>
+            {currentQuestion && (
+              <ChatInterface
+                question={currentQuestion.question}
+                questionId={currentQuestion.id}
+                onSendMessage={handleSendMessage}
+                isLoading={chatLoading}
+              />
+            )}
           </div>
 
           {/* Right Pane - Question */}
