@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { Send, Plus, X, Loader2, Paperclip } from 'lucide-react';
+import { Send, Plus, X, Loader2, Paperclip, Maximize2, Minimize2 } from 'lucide-react';
 
 interface ChatMessage {
     id: string;
@@ -27,6 +27,7 @@ export default function ChatInterface({ question, questionId, onSendMessage, isL
     const [inputValue, setInputValue] = useState('');
     const [attachedFiles, setAttachedFiles] = useState<FileAttachment[]>([]);
     const [isSending, setIsSending] = useState(false);
+    const [composeMode, setComposeMode] = useState(false); // When true, Enter creates new line instead of sending
 
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
@@ -141,9 +142,21 @@ export default function ChatInterface({ question, questionId, onSendMessage, isL
     };
 
     const handleKeyDown = (e: React.KeyboardEvent) => {
-        if (e.key === 'Enter' && !e.shiftKey) {
-            e.preventDefault();
-            handleSend();
+        if (e.key === 'Enter') {
+            if (composeMode) {
+                // In compose mode, Enter creates new line, Ctrl/Cmd+Enter sends
+                if (e.ctrlKey || e.metaKey) {
+                    e.preventDefault();
+                    handleSend();
+                }
+                // Otherwise let the default Enter behavior (new line) happen
+            } else {
+                // Normal mode: Enter sends, Shift+Enter creates new line
+                if (!e.shiftKey) {
+                    e.preventDefault();
+                    handleSend();
+                }
+            }
         }
     };
 
@@ -257,18 +270,35 @@ export default function ChatInterface({ question, questionId, onSendMessage, isL
                         className="hidden"
                     />
 
-                    {/* Text Input */}
-                    <div className="flex-1 bg-gray-100 rounded-2xl px-4 py-2 border border-gray-200">
+                    {/* Text Input with Compose Mode Toggle inside */}
+                    <div className="flex-1 bg-gray-100 rounded-2xl px-4 py-2 border border-gray-200 flex items-end gap-2">
                         <textarea
                             ref={textareaRef}
                             value={inputValue}
                             onChange={(e) => setInputValue(e.target.value)}
                             onKeyDown={handleKeyDown}
-                            placeholder="Ask about this question..."
+                            placeholder={composeMode
+                                ? "Type your message... (Ctrl+Enter to send)"
+                                : "Ask about this question..."
+                            }
                             rows={1}
-                            className="w-full bg-transparent text-gray-800 placeholder-gray-400 resize-none outline-none text-sm leading-relaxed max-h-[150px]"
+                            className="flex-1 bg-transparent text-gray-800 placeholder-gray-400 resize-none outline-none text-sm leading-relaxed max-h-[150px]"
                             disabled={isSending}
                         />
+                        {/* Compose Mode Toggle - inside input field */}
+                        <button
+                            onClick={() => setComposeMode(!composeMode)}
+                            className={`flex-shrink-0 w-8 h-8 flex items-center justify-center rounded-full transition-colors ${composeMode
+                                ? 'text-blue-600 bg-blue-100 hover:bg-blue-200'
+                                : 'text-gray-400 hover:text-gray-600 hover:bg-gray-200'
+                                }`}
+                            title={composeMode
+                                ? 'Compose mode: Enter = new line, Ctrl+Enter = send'
+                                : 'Normal mode: Enter = send, Shift+Enter = new line'
+                            }
+                        >
+                            {composeMode ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
+                        </button>
                     </div>
 
                     {/* Send Button */}
