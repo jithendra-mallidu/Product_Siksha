@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { Send, Plus, X, Loader2, Paperclip, Maximize2, Minimize2 } from 'lucide-react';
+import { Send, Plus, X, Loader2, Paperclip, Maximize2, Minimize2, Trash2 } from 'lucide-react';
 
 interface ChatMessage {
     id: string;
@@ -33,12 +33,37 @@ export default function ChatInterface({ question, questionId, onSendMessage, isL
     const fileInputRef = useRef<HTMLInputElement>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-    // Clear messages when question changes
+    // Load messages from localStorage when question changes
     useEffect(() => {
-        setMessages([]);
+        const storageKey = `chat_messages_${questionId}`;
+        const savedMessages = localStorage.getItem(storageKey);
+        if (savedMessages) {
+            try {
+                const parsed = JSON.parse(savedMessages);
+                // Restore Date objects for timestamps
+                const restored = parsed.map((msg: ChatMessage) => ({
+                    ...msg,
+                    timestamp: new Date(msg.timestamp)
+                }));
+                setMessages(restored);
+            } catch (e) {
+                console.error('Error loading chat history:', e);
+                setMessages([]);
+            }
+        } else {
+            setMessages([]);
+        }
         setInputValue('');
         setAttachedFiles([]);
     }, [questionId]);
+
+    // Save messages to localStorage when they change
+    useEffect(() => {
+        if (messages.length > 0) {
+            const storageKey = `chat_messages_${questionId}`;
+            localStorage.setItem(storageKey, JSON.stringify(messages));
+        }
+    }, [messages, questionId]);
 
     // Auto-scroll to bottom when new messages arrive
     useEffect(() => {
@@ -160,8 +185,30 @@ export default function ChatInterface({ question, questionId, onSendMessage, isL
         }
     };
 
+    const clearChat = () => {
+        const storageKey = `chat_messages_${questionId}`;
+        localStorage.removeItem(storageKey);
+        setMessages([]);
+    };
+
     return (
         <div className="flex flex-col h-full bg-white rounded-lg shadow-sm overflow-hidden">
+            {/* Chat Header with Clear Button */}
+            {messages.length > 0 && (
+                <div className="flex items-center justify-between px-4 py-2 border-b border-gray-100">
+                    <span className="text-xs text-gray-500">
+                        {messages.length} message{messages.length !== 1 ? 's' : ''}
+                    </span>
+                    <button
+                        onClick={clearChat}
+                        className="flex items-center gap-1 px-2 py-1 text-xs text-gray-500 hover:text-red-600 hover:bg-red-50 rounded transition-colors"
+                        title="Clear chat history"
+                    >
+                        <Trash2 className="w-3 h-3" />
+                        Clear
+                    </button>
+                </div>
+            )}
             {/* Chat Messages */}
             <div className="flex-1 overflow-y-auto p-4 space-y-4 min-h-[400px] max-h-[500px]">
                 {messages.length === 0 ? (
