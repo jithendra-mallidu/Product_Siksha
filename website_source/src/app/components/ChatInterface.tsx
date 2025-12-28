@@ -132,6 +132,11 @@ export default function ChatInterface({ question, questionId, onSendMessage, isL
             setMessages(prev => [...prev, errorMessage]);
         } finally {
             setIsSending(false);
+            // Auto-focus the input field after receiving response
+            // Use setTimeout to ensure focus happens after React re-render
+            setTimeout(() => {
+                textareaRef.current?.focus();
+            }, 100);
         }
     };
 
