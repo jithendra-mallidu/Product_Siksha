@@ -1,25 +1,23 @@
 #!/usr/bin/env python3
 """
-PM Mentor MCP Server - RAG-powered PM interview coaching.
+PM Mentor MCP Server - Knowledge retrieval for PM interview coaching.
 
-Exposes the PM Mentor agent as an MCP tool that can be called from
-Claude Code, ChatGPT, Gemini, or any MCP-compatible client.
-
-Connects directly to the vector DB and Claude API — no Flask backend needed.
+Exposes the PM interview knowledge base (Lewis Lin's books + Substack articles)
+as MCP tools and prompts. The server handles RAG retrieval (free Gemini embeddings
++ pgvector search) and returns relevant context. The host LLM (Claude, ChatGPT,
+Gemini, etc.) does the reasoning — so the token cost is on the client, not us.
 """
 
-import json
 import os
 from pathlib import Path
 
 import psycopg2
-from anthropic import Anthropic
 import google.generativeai as genai
 from mcp.server.fastmcp import FastMCP
 
-# Load .env from backend directory
 BACKEND_DIR = Path(__file__).parent.parent / "backend"
 ENV_FILE = BACKEND_DIR / ".env"
+
 
 def load_env():
     if ENV_FILE.exists():
@@ -29,15 +27,15 @@ def load_env():
                 key, _, value = line.partition("=")
                 os.environ.setdefault(key.strip(), value.strip())
 
+
 load_env()
 
 VECTOR_DB_URL = os.environ.get("VECTOR_DB_URL", "")
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 EMBEDDING_MODEL = "models/gemini-embedding-001"
 EMBEDDING_DIMENSIONS = 3072
 
-SYSTEM_PROMPT = """You are a PM Interview Mentor, an expert coach helping candidates prepare for Product Management interviews at top tech companies.
+MENTOR_SYSTEM_PROMPT = """You are a PM Interview Mentor, an expert coach helping candidates prepare for Product Management interviews at top tech companies.
 
 ## Your Role
 - Guide candidates through structured problem-solving, don't just give answers
@@ -68,12 +66,13 @@ You do NOT default to any single framework for a question type. Instead:
 - If the candidate gives a good answer, acknowledge it and suggest how to make it even better
 - If they're way off track, guide them back with questions rather than lecturing"""
 
-# In-memory conversation store keyed by session_id
-conversations: dict[str, list[dict]] = {}
-
 mcp = FastMCP(
     "pm-mentor",
-    instructions="PM Interview Mentor — practice PM interview questions with RAG-powered coaching from Lewis Lin's books and articles.",
+    instructions=(
+        "PM Interview Knowledge Base — retrieves relevant coaching context from "
+        "Lewis Lin's PM interview books and Substack articles. Use the retrieve tool "
+        "to get context, then coach the user using that context with the pm_coach prompt."
+    ),
 )
 
 
@@ -117,110 +116,166 @@ def retrieve_relevant_chunks(query: str, top_k: int = 5) -> list[dict]:
     return results
 
 
-def build_context(question: str, category: str, company: str, chunks: list[dict]) -> str:
+# --- MCP Tools ---
+
+
+@mcp.tool()
+def pm_retrieve(
+    query: str,
+    question: str = "",
+    category: str = "",
+    company: str = "",
+    top_k: int = 5,
+) -> str:
+    """Retrieve relevant PM interview knowledge from the vector database.
+    Returns context from Lewis Lin's books and Substack articles that is most
+    relevant to the query. Use this before coaching a candidate on a PM question.
+
+    Args:
+        query: The search query — can be a question, topic, or the candidate's answer
+        question: The specific PM interview question being practiced
+        category: Question category (Product Design, Strategy, Execution/Metrics, Behavioral, Estimation, Technical)
+        company: Target company (Google, Meta, Amazon, etc.)
+        top_k: Number of knowledge chunks to retrieve (default 5, max 10)
+    """
+    top_k = min(top_k, 10)
+    search_query = " ".join(filter(None, [category, question, query]))
+    chunks = retrieve_relevant_chunks(search_query, top_k)
+
+    if not chunks:
+        return "No relevant content found. The knowledge base may be unavailable."
+
     parts = []
-    if chunks:
-        parts.append("## Relevant Knowledge Base Context")
-        for chunk in chunks:
-            if chunk["similarity"] > 0.3:
-                parts.append(f"\n**From: {chunk['source']}**\n{chunk['text']}")
-    parts.append("\n## Current Question")
-    parts.append(f"**Category:** {category}")
-    parts.append(f"**Company:** {company}")
-    parts.append(f"**Question:** {question}")
+    parts.append(f"## Retrieved Knowledge Context")
+    if question:
+        parts.append(f"**Question:** {question}")
+    if category:
+        parts.append(f"**Category:** {category}")
+    if company:
+        parts.append(f"**Company:** {company}")
+    parts.append("")
+
+    for i, chunk in enumerate(chunks, 1):
+        if chunk["similarity"] > 0.2:
+            parts.append(
+                f"### Source {i}: {chunk['source']} "
+                f"(relevance: {chunk['similarity']:.0%})\n{chunk['text']}\n"
+            )
+
+    parts.append(
+        "\n---\n*Use this context to inform your coaching. "
+        "Draw on specific insights rather than giving generic advice.*"
+    )
     return "\n".join(parts)
 
 
 @mcp.tool()
-def mentor_chat(
-    message: str,
-    question: str = "",
-    category: str = "General",
-    company: str = "Unknown",
-    session_id: str = "default",
-) -> str:
-    """Chat with the PM Interview Mentor for coaching on product management interview questions.
+def pm_knowledge_stats() -> str:
+    """Get statistics about the PM interview knowledge base — total chunks, sources, and coverage."""
+    if not VECTOR_DB_URL:
+        return "Knowledge base unavailable: VECTOR_DB_URL not configured."
+
+    conn = psycopg2.connect(VECTOR_DB_URL)
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT COUNT(*) FROM knowledge_chunks")
+    total = cursor.fetchone()[0]
+
+    cursor.execute(
+        "SELECT source_type, COUNT(*), COUNT(DISTINCT source_name) "
+        "FROM knowledge_chunks GROUP BY source_type"
+    )
+    by_type = cursor.fetchall()
+
+    cursor.execute(
+        "SELECT source_name, COUNT(*) FROM knowledge_chunks "
+        "GROUP BY source_name ORDER BY COUNT(*) DESC LIMIT 10"
+    )
+    top_sources = cursor.fetchall()
+
+    conn.close()
+
+    lines = [f"## PM Knowledge Base Stats", f"**Total chunks:** {total}\n"]
+    for stype, count, distinct in by_type:
+        lines.append(f"- **{stype}**: {count} chunks from {distinct} sources")
+    lines.append(f"\n### Top Sources")
+    for name, count in top_sources:
+        lines.append(f"- {name}: {count} chunks")
+
+    return "\n".join(lines)
+
+
+# --- MCP Prompts ---
+
+
+@mcp.prompt()
+def pm_coach(question: str, category: str = "General", company: str = "Unknown") -> str:
+    """Start a PM interview coaching session. Retrieves relevant knowledge and sets up
+    the mentor persona so the host LLM can coach the candidate.
 
     Args:
-        message: Your message or answer to discuss with the mentor
-        question: The PM interview question you're practicing (set once per session)
-        category: Question category - Product Design, Strategy, Execution/Metrics, Behavioral, Estimation, Technical
-        company: Target company for the question (e.g. Google, Meta, Amazon)
-        session_id: Session identifier to maintain conversation context across turns
+        question: The PM interview question to practice
+        category: Question category (Product Design, Strategy, Metrics, Behavioral, Estimation, Technical)
+        company: Target company
     """
-    if not ANTHROPIC_API_KEY:
-        return "Error: ANTHROPIC_API_KEY not configured."
+    chunks = retrieve_relevant_chunks(f"{category} {question}", top_k=5)
 
-    history = conversations.get(session_id, [])
+    context_parts = []
+    if chunks:
+        context_parts.append("## Relevant Knowledge Base Context\n")
+        for chunk in chunks:
+            if chunk["similarity"] > 0.2:
+                context_parts.append(
+                    f"**From: {chunk['source']}**\n{chunk['text']}\n"
+                )
+    context = "\n".join(context_parts)
 
-    search_query = f"{category} {question} {message}"
-    chunks = retrieve_relevant_chunks(search_query)
-    context = build_context(question, category, company, chunks)
-
-    messages = []
-    if not history:
-        messages.append({
-            "role": "user",
-            "content": f"{context}\n\n---\n\nThe candidate says: {message}",
-        })
-    else:
-        messages.append({
-            "role": "user",
-            "content": f"{context}\n\n---\n\nThe candidate says: {history[0]['content']}",
-        })
-        for msg in history[1:]:
-            messages.append({"role": msg["role"], "content": msg["content"]})
-        messages.append({"role": "user", "content": message})
-
-    client = Anthropic(api_key=ANTHROPIC_API_KEY)
-    response = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=1500,
-        system=SYSTEM_PROMPT,
-        messages=messages,
+    return (
+        f"{MENTOR_SYSTEM_PROMPT}\n\n"
+        f"---\n\n"
+        f"{context}\n\n"
+        f"---\n\n"
+        f"## Current Session\n"
+        f"**Question:** {question}\n"
+        f"**Category:** {category}\n"
+        f"**Company:** {company}\n\n"
+        f"The candidate is ready to practice. Introduce the question, assess their "
+        f"initial understanding, and guide them through a structured approach using "
+        f"the retrieved context above. Start by asking what their initial thoughts are."
     )
 
-    assistant_reply = response.content[0].text
 
-    history.append({"role": "user", "content": message})
-    history.append({"role": "assistant", "content": assistant_reply})
-    conversations[session_id] = history
-
-    return assistant_reply
-
-
-@mcp.tool()
-def mentor_reset(session_id: str = "default") -> str:
-    """Reset a mentor conversation to start fresh with a new question.
+@mcp.prompt()
+def pm_mock_interview(category: str = "Product Design", company: str = "Google") -> str:
+    """Start a full mock PM interview. The host LLM acts as interviewer, using the
+    knowledge base to evaluate answers and provide realistic follow-up questions.
 
     Args:
-        session_id: Session identifier to reset
+        category: Interview category (Product Design, Strategy, Metrics, Behavioral, Estimation)
+        company: Company to simulate the interview for
     """
-    if session_id in conversations:
-        del conversations[session_id]
-        return f"Session '{session_id}' cleared. Ready for a new question."
-    return f"No active session '{session_id}' found."
+    chunks = retrieve_relevant_chunks(
+        f"{company} {category} interview question", top_k=3
+    )
 
+    example_questions = []
+    for chunk in chunks:
+        if chunk["similarity"] > 0.3:
+            example_questions.append(chunk["text"][:200])
 
-@mcp.tool()
-def mentor_search(query: str, top_k: int = 5) -> str:
-    """Search the PM knowledge base directly for relevant content from Lewis Lin's books and articles.
-
-    Args:
-        query: Search query about PM interviews, frameworks, or concepts
-        top_k: Number of results to return (default 5)
-    """
-    chunks = retrieve_relevant_chunks(query, top_k)
-    if not chunks:
-        return "No relevant content found. Check that VECTOR_DB_URL and GEMINI_API_KEY are configured."
-
-    results = []
-    for i, chunk in enumerate(chunks, 1):
-        results.append(
-            f"### Result {i} (similarity: {chunk['similarity']:.3f})\n"
-            f"**Source:** {chunk['source']}\n\n{chunk['text']}"
-        )
-    return "\n\n---\n\n".join(results)
+    return (
+        f"You are a PM interviewer at {company} conducting a {category} interview.\n\n"
+        f"## Your Role\n"
+        f"- Ask one question at a time\n"
+        f"- Listen to the candidate's answer before responding\n"
+        f"- Ask realistic follow-up questions that probe deeper\n"
+        f"- After 3-4 exchanges on a question, provide brief feedback and move to the next\n"
+        f"- At the end, give an overall assessment with strengths and areas to improve\n\n"
+        f"## Knowledge Context\n"
+        f"{''.join(example_questions)}\n\n"
+        f"Start by introducing yourself and asking the first {category} question. "
+        f"Make it realistic for a {company} interview."
+    )
 
 
 if __name__ == "__main__":
