@@ -562,6 +562,42 @@ Remember the context: This is about the PM interview question provided."""
             'feedback': 'Unable to get AI feedback at this time. Please try again.'
         }), 500
 
+@app.route('/api/mentor/chat', methods=['POST'])
+@token_required
+def mentor_chat():
+    """Chat with the PM Mentor Agent (RAG-powered by Claude)."""
+    from mentor_agent import chat_with_mentor
+
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'Request body required'}), 400
+
+    question_text = data.get('question', '')
+    question_category = data.get('category', '')
+    company = data.get('company', '')
+    conversation_history = data.get('history', [])
+    user_message = data.get('message', '')
+
+    if not user_message:
+        return jsonify({'error': 'Message is required'}), 400
+
+    try:
+        response_text = chat_with_mentor(
+            question_text=question_text,
+            question_category=question_category,
+            company=company,
+            conversation_history=conversation_history,
+            user_message=user_message
+        )
+        return jsonify({'response': response_text})
+    except Exception as e:
+        print(f"Mentor agent error: {str(e)}")
+        return jsonify({
+            'error': f'Mentor service error: {str(e)}',
+            'response': 'Unable to get mentor feedback at this time. Please try again.'
+        }), 500
+
+
 @app.route('/api/health', methods=['GET'])
 def health():
     """Health check endpoint."""
@@ -569,6 +605,7 @@ def health():
         'status': 'healthy',
         'timestamp': datetime.utcnow().isoformat(),
         'gemini_configured': bool(GEMINI_API_KEY),
+        'anthropic_configured': bool(os.getenv('ANTHROPIC_API_KEY', '')),
         'database': 'postgresql' if 'postgres' in app.config['SQLALCHEMY_DATABASE_URI'] else 'sqlite'
     })
 

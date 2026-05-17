@@ -24,3 +24,8 @@ __pycache__/
 
 # Misc
 backend_local_v1/
+
+# Vector DB credentials
+backend/.vectordb_url
+backend/.substack_cookie
+backend/.substack_progress.json

@@ -129,34 +129,47 @@ export default function CategoryPage({ onLogout }: CategoryPageProps) {
   const currentQuestion = questions[currentQuestionIndex];
 
   // Handle sending messages to AI chat
-  const handleSendMessage = useCallback(async (message: string, files: FileAttachment[]): Promise<string> => {
+  const handleSendMessage = useCallback(async (message: string, _files: FileAttachment[]): Promise<string> => {
     if (!currentQuestion) return 'No question selected.';
 
     setChatLoading(true);
     try {
-      // Prepare file data for API
-      const fileData = files.map(f => ({
-        name: f.file.name,
-        type: f.file.type,
-        base64: f.base64
-      }));
+      // Build conversation history from localStorage
+      const storageKey = `chat_messages_${currentQuestion.id}`;
+      const savedMessages = localStorage.getItem(storageKey);
+      let history: { role: string; content: string }[] = [];
+      if (savedMessages) {
+        try {
+          const parsed = JSON.parse(savedMessages);
+          history = parsed.map((msg: { role: string; content: string }) => ({
+            role: msg.role,
+            content: msg.content
+          }));
+        } catch (e) {
+          console.error('Error parsing chat history:', e);
+        }
+      }
 
-      const response = await fetch(`${API_BASE}/feedback`, {
+      const response = await fetch(`${API_BASE}/mentor/chat`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('token')}`
+        },
         body: JSON.stringify({
           question: currentQuestion.question,
-          answer: message,
-          prompt: message || 'Please analyze my answer and provide feedback.',
-          files: fileData
+          category: currentQuestion.question_type,
+          company: currentQuestion.company_normalized || currentQuestion.company,
+          history: history,
+          message: message
         })
       });
 
       const data = await response.json();
-      return data.feedback || 'Unable to get feedback.';
+      return data.response || 'Unable to get mentor feedback.';
     } catch (error) {
-      console.error('Error getting feedback:', error);
-      throw new Error('Error getting AI feedback. Please try again.');
+      console.error('Error getting mentor feedback:', error);
+      throw new Error('Error getting mentor feedback. Please try again.');
     } finally {
       setChatLoading(false);
     }
