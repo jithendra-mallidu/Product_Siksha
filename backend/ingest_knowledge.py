@@ -78,7 +78,9 @@ def chunk_text(text, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
                 chunk = chunk[:break_point + 1]
                 end = start + break_point + 1
 
-        chunks.append(chunk.strip())
+        stripped = chunk.strip()
+        if stripped:
+            chunks.append(stripped)
         start = end - char_overlap
 
     return chunks

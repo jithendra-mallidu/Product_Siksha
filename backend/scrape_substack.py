@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from ingest_knowledge import ingest_text_content, check_already_ingested, configure_genai
 
 SUBSTACK_BASE = "https://lewislin.substack.com"
-BATCH_SIZE = 15
+BATCH_SIZE = int(os.getenv('SCRAPE_BATCH_SIZE', '15'))
 PROGRESS_FILE = os.path.join(os.path.dirname(__file__), '.substack_progress.json')
 COOKIE_FILE = os.path.join(os.path.dirname(__file__), '.substack_cookie')
 
@@ -251,17 +251,32 @@ class ArticleHTMLParser(HTMLParser):
     def __init__(self):
         super().__init__()
         self.in_article = False
+        self.article_depth = 0
         self.in_paywall = False
+        self.in_skip_tag = False
+        self.skip_depth = 0
         self.text_parts = []
         self.title = ""
         self.in_title = False
+
+    SKIP_TAGS = {'script', 'style', 'noscript', 'svg'}
+    VOID_TAGS = {'br', 'hr', 'img', 'input', 'meta', 'link', 'area', 'base', 'col', 'embed', 'source', 'track', 'wbr'}
 
     def handle_starttag(self, tag, attrs):
         attrs_dict = dict(attrs)
         classes = attrs_dict.get('class', '')
 
+        if tag in self.SKIP_TAGS:
+            self.in_skip_tag = True
+            self.skip_depth += 1
+            return
+
         if 'body' in classes and 'markup' in classes:
             self.in_article = True
+            self.article_depth = 1
+        elif self.in_article and tag not in self.VOID_TAGS:
+            self.article_depth += 1
+
         if 'paywall' in classes or 'subscription-widget' in classes:
             self.in_paywall = True
             self.in_article = False
@@ -269,19 +284,35 @@ class ArticleHTMLParser(HTMLParser):
         if tag == 'h1' and 'post-title' in classes:
             self.in_title = True
 
-        if self.in_article and not self.in_paywall:
+        if self.in_article and not self.in_paywall and not self.in_skip_tag:
             if tag in ('h1', 'h2', 'h3', 'h4'):
                 self.text_parts.append('\n\n## ')
             elif tag == 'p':
                 self.text_parts.append('\n\n')
             elif tag == 'li':
                 self.text_parts.append('\n- ')
+            elif tag == 'blockquote':
+                self.text_parts.append('\n\n> ')
 
     def handle_endtag(self, tag):
+        if tag in self.SKIP_TAGS and self.in_skip_tag:
+            self.skip_depth -= 1
+            if self.skip_depth <= 0:
+                self.in_skip_tag = False
+                self.skip_depth = 0
+            return
+
         if self.in_title and tag == 'h1':
             self.in_title = False
 
+        if self.in_article and tag not in self.VOID_TAGS:
+            self.article_depth -= 1
+            if self.article_depth <= 0:
+                self.in_article = False
+
     def handle_data(self, data):
+        if self.in_skip_tag:
+            return
         if self.in_title:
             self.title = data.strip()
         elif self.in_article and not self.in_paywall:

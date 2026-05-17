@@ -32,7 +32,8 @@ CORS(app, origins=[
 # Configuration
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-secret-key-change-in-production')
 # Use DATABASE_URL if set (Cloud Run), otherwise sqlite:///product_siksha.db (Local)
-database_url = os.getenv('DATABASE_URL', 'sqlite:///product_siksha.db')
+basedir = os.path.abspath(os.path.dirname(__file__))
+database_url = os.getenv('DATABASE_URL', f'sqlite:///{os.path.join(basedir, "product_siksha.db")}')
 # Handle Postgres URL scheme fix for SQLAlchemy (postgres:// -> postgresql://)
 if database_url.startswith("postgres://"):
     database_url = database_url.replace("postgres://", "postgresql://", 1)
