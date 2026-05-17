@@ -66,6 +66,16 @@ You do NOT default to any single framework for a question type. Instead:
 - If the candidate gives a good answer, acknowledge it and suggest how to make it even better
 - If they're way off track, guide them back with questions rather than lecturing"""
 
+def _parse_args():
+    import argparse
+    parser = argparse.ArgumentParser(description="PM Mentor MCP Server")
+    parser.add_argument("--http", action="store_true", help="Run as HTTP server (default: stdio)")
+    parser.add_argument("--port", type=int, default=8080, help="HTTP port (default: 8080)")
+    parser.add_argument("--host", default="0.0.0.0", help="HTTP host (default: 0.0.0.0)")
+    return parser.parse_args()
+
+_args = _parse_args() if __name__ == "__main__" else None
+
 mcp = FastMCP(
     "pm-mentor",
     instructions=(
@@ -73,6 +83,8 @@ mcp = FastMCP(
         "Lewis Lin's PM interview books and Substack articles. Use the retrieve tool "
         "to get context, then coach the user using that context with the pm_coach prompt."
     ),
+    host=_args.host if _args else "127.0.0.1",
+    port=_args.port if _args else 8080,
 )
 
 
@@ -279,4 +291,8 @@ def pm_mock_interview(category: str = "Product Design", company: str = "Google")
 
 
 if __name__ == "__main__":
-    mcp.run()
+    if _args and _args.http:
+        print(f"Starting PM Mentor MCP server on http://{_args.host}:{_args.port}/mcp")
+        mcp.run(transport="streamable-http")
+    else:
+        mcp.run()
