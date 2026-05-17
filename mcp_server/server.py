@@ -6,14 +6,30 @@ Exposes the PM interview knowledge base (Lewis Lin's books + Substack articles)
 as MCP tools and prompts. The server handles RAG retrieval (free Gemini embeddings
 + pgvector search) and returns relevant context. The host LLM (Claude, ChatGPT,
 Gemini, etc.) does the reasoning — so the token cost is on the client, not us.
+
+Usage:
+    # Local stdio (Claude Code)
+    python server.py
+
+    # Local HTTP
+    python server.py --http --port 8080
+
+    # Cloud Run (auto-detected via PORT env var)
+    Deployed with Dockerfile — runs HTTP with API key auth.
 """
 
+import hmac
 import os
 from pathlib import Path
 
 import psycopg2
 import google.generativeai as genai
 from mcp.server.fastmcp import FastMCP
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+
+# --- Config ---
 
 BACKEND_DIR = Path(__file__).parent.parent / "backend"
 ENV_FILE = BACKEND_DIR / ".env"
@@ -32,6 +48,7 @@ load_env()
 
 VECTOR_DB_URL = os.environ.get("VECTOR_DB_URL", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+MCP_API_KEY = os.environ.get("MCP_API_KEY", "")
 EMBEDDING_MODEL = "models/gemini-embedding-001"
 EMBEDDING_DIMENSIONS = 3072
 
@@ -66,13 +83,23 @@ You do NOT default to any single framework for a question type. Instead:
 - If the candidate gives a good answer, acknowledge it and suggest how to make it even better
 - If they're way off track, guide them back with questions rather than lecturing"""
 
+# --- Server setup ---
+
+
 def _parse_args():
     import argparse
+
     parser = argparse.ArgumentParser(description="PM Mentor MCP Server")
-    parser.add_argument("--http", action="store_true", help="Run as HTTP server (default: stdio)")
-    parser.add_argument("--port", type=int, default=8080, help="HTTP port (default: 8080)")
+    parser.add_argument(
+        "--http", action="store_true", help="Run as HTTP server (default: stdio)"
+    )
+    parser.add_argument(
+        "--port", type=int, default=int(os.environ.get("PORT", "8080")),
+        help="HTTP port (default: 8080, or PORT env var)",
+    )
     parser.add_argument("--host", default="0.0.0.0", help="HTTP host (default: 0.0.0.0)")
     return parser.parse_args()
+
 
 _args = _parse_args() if __name__ == "__main__" else None
 
@@ -86,6 +113,35 @@ mcp = FastMCP(
     host=_args.host if _args else "127.0.0.1",
     port=_args.port if _args else 8080,
 )
+
+
+# --- API Key Auth Middleware ---
+
+
+class APIKeyAuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        if request.url.path == "/health":
+            return await call_next(request)
+
+        if not MCP_API_KEY:
+            return await call_next(request)
+
+        api_key = (
+            request.headers.get("x-api-key")
+            or request.query_params.get("api_key")
+            or ""
+        )
+
+        if not api_key or not hmac.compare_digest(api_key, MCP_API_KEY):
+            return JSONResponse(
+                {"error": "Unauthorized. Provide a valid API key via x-api-key header."},
+                status_code=401,
+            )
+
+        return await call_next(request)
+
+
+# --- Vector DB ---
 
 
 def get_query_embedding(query: str) -> list[float] | None:
@@ -158,7 +214,7 @@ def pm_retrieve(
         return "No relevant content found. The knowledge base may be unavailable."
 
     parts = []
-    parts.append(f"## Retrieved Knowledge Context")
+    parts.append("## Retrieved Knowledge Context")
     if question:
         parts.append(f"**Question:** {question}")
     if category:
@@ -210,7 +266,7 @@ def pm_knowledge_stats() -> str:
     lines = [f"## PM Knowledge Base Stats", f"**Total chunks:** {total}\n"]
     for stype, count, distinct in by_type:
         lines.append(f"- **{stype}**: {count} chunks from {distinct} sources")
-    lines.append(f"\n### Top Sources")
+    lines.append("\n### Top Sources")
     for name, count in top_sources:
         lines.append(f"- {name}: {count} chunks")
 
@@ -290,9 +346,19 @@ def pm_mock_interview(category: str = "Product Design", company: str = "Google")
     )
 
 
+# --- Entry point ---
+
 if __name__ == "__main__":
-    if _args and _args.http:
-        print(f"Starting PM Mentor MCP server on http://{_args.host}:{_args.port}/mcp")
-        mcp.run(transport="streamable-http")
+    if _args and (_args.http or os.environ.get("PORT")):
+        if MCP_API_KEY:
+            mcp._custom_starlette_app = None
+            app = mcp.streamable_http_app()
+            app.add_middleware(APIKeyAuthMiddleware)
+            import uvicorn
+            uvicorn.run(app, host=_args.host, port=_args.port)
+        else:
+            print(f"Starting PM Mentor MCP server on http://{_args.host}:{_args.port}/mcp")
+            print("WARNING: No MCP_API_KEY set — server is unauthenticated")
+            mcp.run(transport="streamable-http")
     else:
         mcp.run()
